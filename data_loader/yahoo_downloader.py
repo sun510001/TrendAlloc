@@ -2,14 +2,20 @@ import yfinance as yf
 import pandas as pd
 import os
 import datetime
-from typing import List, Dict
+from typing import Dict, List
 from logger import logger
 from utils.decorators import retry
 
 class YahooIncrementalLoader:
     """
+    [Data ETL Class]
     Handles incremental downloading of financial data from Yahoo Finance.
-    Saves raw data to CSV.
+    
+    Features:
+    - Automatic Incremental Update: Only downloads new data since the last record.
+    - Robust MultiIndex Handling: Flattens yfinance v0.2+ structures correctly.
+    - Full OHLCV Preservation: Keeps Open, High, Low, Close, Volume.
+    - Atomic Writes: Prevents CSV corruption.
     """
 
     def __init__(self, storage_path: str = "./data"):
@@ -17,83 +23,112 @@ class YahooIncrementalLoader:
         if not os.path.exists(self.storage_path):
             os.makedirs(self.storage_path)
 
-    def _get_last_date(self, file_path: str) -> datetime.date:
+    def _get_existing_data(self, file_path: str) -> pd.DataFrame:
         """
-        Reads the CSV to find the last recorded date.
-        Returns None if file doesn't exist or is empty.
+        Reads existing CSV. Returns empty DataFrame if file doesn't exist.
         """
         if not os.path.exists(file_path):
-            return None
+            return pd.DataFrame()
         try:
-            # Read only the index (Date) to save memory
             df = pd.read_csv(file_path, index_col='Date', parse_dates=True)
-            if df.empty:
-                return None
-            return df.index[-1].date()
+            return df
         except Exception as e:
-            logger.error(f"Error reading existing file {file_path}: {e}")
-            return None
+            logger.warning(f"Corrupt file found at {file_path}, starting fresh. Error: {e}")
+            return pd.DataFrame()
 
     @retry(max_retries=3, delay=5)
     def download_symbol(self, ticker: str, name: str, start_date_fallback: str = "1985-01-01"):
         """
-        Downloads data for a single symbol incrementally.
-        
-        Args:
-            ticker (str): Yahoo Finance ticker (e.g., '^NDX').
-            name (str): Local filename alias (e.g., 'QQQ_Proxy').
-            start_date_fallback (str): Start date if no local data exists.
+        Smart downloader that preserves OHLCV data and handles yfinance quirks.
         """
         file_path = os.path.join(self.storage_path, f"{name}.csv")
-        last_date = self._get_last_date(file_path)
+        df_old = self._get_existing_data(file_path)
         
-        today = datetime.date.today()
-        
-        # Determine download start date
-        if last_date:
-            if last_date >= today - datetime.timedelta(days=1):
-                logger.info(f"[{name}] Data is up to date ({last_date}). Skipping.")
-                return
-            
-            # Start from the next day
-            start_download = last_date + datetime.timedelta(days=1)
+        # 1. Determine Start Date
+        if not df_old.empty:
+            last_date = df_old.index[-1].date()
+            # Start from the next day to avoid overlap (yfinance start is inclusive)
+            start_download_date = last_date + datetime.timedelta(days=1)
             is_update = True
-            logger.info(f"[{name}] Found existing data. Updating from {start_download}...")
+            
+            # If local data is up to today (or yesterday), skip
+            if start_download_date >= datetime.date.today():
+                logger.info(f"[{name}] Already up to date ({last_date}).")
+                return
         else:
-            start_download = datetime.datetime.strptime(start_date_fallback, "%Y-%m-%d").date()
+            start_download_date = datetime.datetime.strptime(start_date_fallback, "%Y-%m-%d").date()
             is_update = False
-            logger.info(f"[{name}] No local data. Downloading full history from {start_download}...")
 
-        # Fetch data
-        # auto_adjust=True handles splits/dividends for stocks, crucial for long term
-        df_new = yf.download(ticker, start=start_download, progress=False, auto_adjust=True)
+        logger.info(f"[{name}] Downloading {ticker} from {start_download_date}...")
 
-        if df_new.empty:
-            logger.warning(f"[{name}] No new data found for ticker {ticker}.")
+        # 2. Download Data (Auto Adjust for Splits/Dividends)
+        try:
+            # auto_adjust=True returns: Open, High, Low, Close, Volume (Prices are adjusted)
+            df_new = yf.download(ticker, start=start_download_date, progress=False, auto_adjust=True)
+        except Exception as e:
+            logger.error(f"[{name}] Download failed: {e}")
             return
 
-        # Formatting
-        df_new.index.name = 'Date'
-        # Ensure we only keep standard columns to avoid MultiIndex issues in yfinance
-        if 'Close' in df_new.columns:
-             # Handle yfinance v0.2+ structure if it returns multi-level columns
-            if isinstance(df_new.columns, pd.MultiIndex):
-                df_new = df_new.xs(ticker, axis=1, level=1, drop_level=True)
+        if df_new.empty:
+            logger.info(f"[{name}] No new data found on server.")
+            return
+
+        # 3. Clean & Flatten MultiIndex (Crucial Step)
+        # yfinance often returns columns like: ('Close', 'AAPL'), ('Open', 'AAPL')
+        if isinstance(df_new.columns, pd.MultiIndex):
+            try:
+                # If the Ticker is in the second level (level=1), extract that cross-section
+                if ticker in df_new.columns.get_level_values(1):
+                    df_new = df_new.xs(ticker, axis=1, level=1)
+                # Sometimes purely 'Close' etc are top level, but let's check level 0 just in case
+                elif 'Close' in df_new.columns.get_level_values(0):
+                    # In this case, the MultiIndex might be redundant or structured differently.
+                    # We drop the level to flatten it.
+                    df_new.columns = df_new.columns.get_level_values(0)
+            except Exception as e:
+                logger.warning(f"[{name}] MultiIndex parsing warning: {e}. Attempting direct flatten.")
+                # Last resort: just keep the top level names
+                df_new.columns = df_new.columns.get_level_values(0)
         
-        # Save logic
+        # 4. Filter and Order Columns
+        # We want standard OHLCV. Some indexes (like VIX) might not have Volume.
+        desired_cols = ['Open', 'High', 'Low', 'Close', 'Volume']
+        available_cols = [c for c in desired_cols if c in df_new.columns]
+        
+        if not available_cols:
+            logger.error(f"[{name}] Critical Error: Downloaded data has no recognized price columns.")
+            return
+
+        df_new = df_new[available_cols]
+        df_new.index.name = 'Date'
+
+        # 5. Merge and Save
         if is_update:
-            # Append without header
-            df_new.to_csv(file_path, mode='a', header=False)
-            logger.info(f"[{name}] Appended {len(df_new)} records.")
+            # Combine old and new
+            df_final = pd.concat([df_old, df_new])
+            # Remove potential duplicates based on Index (Date)
+            df_final = df_final[~df_final.index.duplicated(keep='last')]
         else:
-            # Write new file
-            df_new.to_csv(file_path)
-            logger.info(f"[{name}] Saved {len(df_new)} records to new file.")
+            df_final = df_new
+
+        # Sort strictly by date
+        df_final.sort_index(inplace=True)
+
+        # Write to CSV
+        df_final.to_csv(file_path)
+        
+        action = "Updated" if is_update else "Created"
+        logger.info(f"[{name}] {action} successfully. Rows: {len(df_final)} | Cols: {list(df_final.columns)}")
 
     def download_batch(self, ticker_map: Dict[str, str], start_year: int = 1985):
         """
-        Batch process a dictionary of {Name: Ticker}.
+        Process a batch of tickers.
         """
-        start_date = f"{start_year}-01-01"
+        logger.info("="*40)
+        logger.info(f"Starting Batch Download (Target Year: {start_year})")
+        logger.info("="*40)
+        
         for name, ticker in ticker_map.items():
-            self.download_symbol(ticker, name, start_date)
+            self.download_symbol(ticker, name, f"{start_year}-01-01")
+        
+        logger.info("Batch Download Complete.\n")

@@ -1,15 +1,15 @@
+from data_loader.tools_gold_probe import GoldDataProbe
 from data_loader.yahoo_downloader import YahooIncrementalLoader
 from data_loader.data_processor import DataProcessor
 from logger import logger
 
 def main():
     # --- Configuration ---
-    # Mapping: { "Local_Filename_Alias" : "Yahoo_Ticker" }
     TICKER_MAP = {
-        "QQQ_Proxy": "^NDX",     # Nasdaq 100 Index (since 1985)
-        "GOLD_Proxy": "GC=F",    # Gold Futures (Continuous)
-        "US30Y_Yield": "^TYX",   # 30-Year Treasury Yield
-        "CASH_Yield": "^IRX"     # 13-Week Treasury Bill Yield
+        "Stocks": "^NDX",   # Nasdaq 100 Index (since 1985)
+        "Gold":   "^XAU",    # Philadelphia Gold/Silver Index (代替 GLD)
+        "Bonds":  "^TYX",   # 30-Year Treasury Yield
+        "Cash":   "^IRX"    # 13-Week Treasury Bill Yield
     }
     START_YEAR = 1985
 
