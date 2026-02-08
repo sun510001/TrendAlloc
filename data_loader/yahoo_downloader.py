@@ -1,5 +1,6 @@
 import yfinance as yf
 import pandas as pd
+import numpy as np
 import os
 import datetime
 from typing import Dict, List
@@ -90,17 +91,24 @@ class YahooIncrementalLoader:
                 # Last resort: just keep the top level names
                 df_new.columns = df_new.columns.get_level_values(0)
         
-        # 4. Filter and Order Columns
-        # We want standard OHLCV. Some indexes (like VIX) might not have Volume.
+        # 4. Standardize Columns
         desired_cols = ['Open', 'High', 'Low', 'Close', 'Volume']
-        available_cols = [c for c in desired_cols if c in df_new.columns]
         
-        if not available_cols:
-            logger.error(f"[{name}] Critical Error: Downloaded data has no recognized price columns.")
-            return
+        # Ensure all columns exist, fill missing with NaN initially
+        for col in desired_cols:
+            if col not in df_new.columns:
+                df_new[col] = np.nan
 
-        df_new = df_new[available_cols]
+        df_new = df_new[desired_cols]
         df_new.index.name = 'Date'
+
+        cols_to_fix = ['Open', 'High', 'Low']
+        for col in cols_to_fix:
+            df_new[col] = df_new[col].replace(0, np.nan)
+            df_new[col] = df_new[col].fillna(df_new['Close'])
+        
+        df_new['Volume'] = df_new['Volume'].fillna(0)
+        # ------------------------------------------------
 
         # 5. Merge and Save
         if is_update:

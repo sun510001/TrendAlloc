@@ -62,3 +62,4 @@ python_files/tests/*/.data/*/.coverage*
 src/testTestingRootWkspc/coverageWorkspace/.coverage
 
 data/*
+data_processed/*

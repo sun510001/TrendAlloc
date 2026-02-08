@@ -1,4 +1,3 @@
-from data_loader.tools_gold_probe import GoldDataProbe
 from data_loader.yahoo_downloader import YahooIncrementalLoader
 from data_loader.data_processor import DataProcessor
 from logger import logger
