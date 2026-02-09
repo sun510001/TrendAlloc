@@ -63,3 +63,4 @@ src/testTestingRootWkspc/coverageWorkspace/.coverage
 
 data/*
 data_processed/*
+strategies/*
