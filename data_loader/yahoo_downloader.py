@@ -4,41 +4,57 @@ import numpy as np
 import os
 import datetime
 import re
-from typing import Dict, List, Any
+import time
+from typing import Dict, List, Any, Optional
 from logger import logger
-from utils.decorators import retry
-
-def sanitize_filename(name: str) -> str:
-    """
-    Sanitize the asset name to be used as a safe filename.
-    Removes or replaces characters like ^, /, \, etc.
-    """
-    # Replace any character that is not a letter, number, hyphen, or underscore with '_'
-    s = re.sub(r'[^\w\s-]', '', name).strip()
-    s = re.sub(r'[-\s]+', '_', s)
-    return s.lower()
+from utils.decorators import ExecutionDecorators
 
 class YahooIncrementalLoader:
     """
     [Data ETL Class]
     Handles incremental downloading of financial data from Yahoo Finance.
     
-    Features:
-    - Automatic Incremental Update: Only downloads new data since the last record.
-    - Robust MultiIndex Handling: Flattens yfinance v0.2+ structures correctly.
-    - Full OHLCV Preservation: Keeps Open, High, Low, Close, Volume.
-    - Atomic Writes: Prevents CSV corruption.
-    - Safe Filenames: Sanitizes asset names for filesystem compatibility.
+    This class manages the lifecycle of market data acquisition, ensuring that only 
+    missing data is fetched and that all local files remain synchronized and healthy.
     """
 
-    def __init__(self, storage_path: str = "./data"):
-        self.storage_path = storage_path
+    def __init__(self, storage_path: str = "./data") -> None:
+        """
+        Initialize the downloader with a target storage path.
+
+        Args:
+            storage_path (str): The directory where CSV files will be stored. Defaults to "./data".
+        """
+        self.storage_path: str = storage_path
         if not os.path.exists(self.storage_path):
             os.makedirs(self.storage_path)
+
+    @staticmethod
+    def sanitize_filename(name: str) -> str:
+        """
+        Sanitize the asset name to be used as a safe filename.
+        Removes or replaces characters like ^, /, \, etc.
+
+        Args:
+            name (str): The raw asset name to be sanitized.
+
+        Returns:
+            str: A filesystem-safe lowercase string.
+        """
+        # Replace any character that is not a letter, number, hyphen, or underscore with '_'
+        s = re.sub(r'[^\w\s-]', '', name).strip()
+        s = re.sub(r'[-\s]+', '_', s)
+        return s.lower()
 
     def _get_existing_data(self, file_path: str) -> pd.DataFrame:
         """
         Reads existing CSV. Returns empty DataFrame if file doesn't exist.
+
+        Args:
+            file_path (str): The absolute path to the CSV file.
+
+        Returns:
+            pd.DataFrame: Loaded data or an empty DataFrame if loading fails.
         """
         if not os.path.exists(file_path):
             return pd.DataFrame()
@@ -49,35 +65,39 @@ class YahooIncrementalLoader:
             logger.warning(f"Corrupt file found at {file_path}, starting fresh. Error: {e}")
             return pd.DataFrame()
 
-    @retry(max_retries=3, delay=5)
-    def download_symbol(self, ticker: str, name: str, start_date_fallback: str = "1985-01-01"):
+    @ExecutionDecorators.retry(max_retries=3, delay=5)
+    def download_symbol(self, ticker: str, name: str, start_date_fallback: str = "1985-01-01") -> None:
         """
         Smart downloader that preserves OHLCV data and handles yfinance quirks.
+        It detects existing local data and only downloads the incremental delta.
+
+        Args:
+            ticker (str): Yahoo Finance symbol (e.g., '^NDX').
+            name (str): Logical name for the asset.
+            start_date_fallback (str): Start date if no local data exists (YYYY-MM-DD).
         """
-        safe_name = sanitize_filename(name)
+        safe_name = self.sanitize_filename(name)
         file_path = os.path.join(self.storage_path, f"{safe_name}.csv")
         df_old = self._get_existing_data(file_path)
         
-        # 1. Determine Start Date
+        is_update = False
         if not df_old.empty:
             last_date = df_old.index[-1].date()
-            # Start from the next day to avoid overlap (yfinance start is inclusive)
+            # Start from the next day to avoid overlap
             start_download_date = last_date + datetime.timedelta(days=1)
             is_update = True
             
-            # If local data is up to today (or yesterday), skip
+            # If local data is already up to today, skip download
             if start_download_date >= datetime.date.today():
                 logger.info(f"[{name}] Already up to date ({last_date}).")
                 return
         else:
             start_download_date = datetime.datetime.strptime(start_date_fallback, "%Y-%m-%d").date()
-            is_update = False
 
         logger.info(f"[{name}] Downloading {ticker} from {start_download_date}...")
 
-        # 2. Download Data (Auto Adjust for Splits/Dividends)
         try:
-            # auto_adjust=True returns: Open, High, Low, Close, Volume (Prices are adjusted)
+            # auto_adjust=True returns adjusted OHLCV
             df_new = yf.download(ticker, start=start_download_date, progress=False, auto_adjust=True)
         except Exception as e:
             logger.error(f"[{name}] Download failed: {e}")
@@ -87,27 +107,19 @@ class YahooIncrementalLoader:
             logger.info(f"[{name}] No new data found on server.")
             return
 
-        # 3. Clean & Flatten MultiIndex (Crucial Step)
-        # yfinance often returns columns like: ('Close', 'AAPL'), ('Open', 'AAPL')
+        # Handle MultiIndex column structures from yfinance
         if isinstance(df_new.columns, pd.MultiIndex):
             try:
-                # If the Ticker is in the second level (level=1), extract that cross-section
                 if ticker in df_new.columns.get_level_values(1):
                     df_new = df_new.xs(ticker, axis=1, level=1)
-                # Sometimes purely 'Close' etc are top level, but let's check level 0 just in case
                 elif 'Close' in df_new.columns.get_level_values(0):
-                    # In this case, the MultiIndex might be redundant or structured differently.
-                    # We drop the level to flatten it.
                     df_new.columns = df_new.columns.get_level_values(0)
             except Exception as e:
-                logger.warning(f"[{name}] MultiIndex parsing warning: {e}. Attempting direct flatten.")
-                # Last resort: just keep the top level names
+                logger.warning(f"[{name}] MultiIndex parsing warning: {e}. Flattening columns.")
                 df_new.columns = df_new.columns.get_level_values(0)
         
-        # 4. Standardize Columns
+        # Standardize OHLCV columns
         desired_cols = ['Open', 'High', 'Low', 'Close', 'Volume']
-        
-        # Ensure all columns exist, fill missing with NaN initially
         for col in desired_cols:
             if col not in df_new.columns:
                 df_new[col] = np.nan
@@ -115,43 +127,44 @@ class YahooIncrementalLoader:
         df_new = df_new[desired_cols]
         df_new.index.name = 'Date'
 
-        cols_to_fix = ['Open', 'High', 'Low']
-        for col in cols_to_fix:
-            df_new[col] = df_new[col].replace(0, np.nan)
-            df_new[col] = df_new[col].fillna(df_new['Close'])
+        # Fix zero values or NaNs by filling with Close price
+        for col in ['Open', 'High', 'Low']:
+            df_new[col] = df_new[col].replace(0, np.nan).fillna(df_new['Close'])
         
         df_new['Volume'] = df_new['Volume'].fillna(0)
-        # ------------------------------------------------
 
-        # 5. Merge and Save
+        # Merge and sort
         if is_update:
-            # Combine old and new
             df_final = pd.concat([df_old, df_new])
-            # Remove potential duplicates based on Index (Date)
             df_final = df_final[~df_final.index.duplicated(keep='last')]
         else:
             df_final = df_new
 
-        # Sort strictly by date
         df_final.sort_index(inplace=True)
-
-        # Write to CSV
         df_final.to_csv(file_path)
         
-        action = "Updated" if is_update else "Created"
-        logger.info(f"[{name}] {action} successfully. Rows: {len(df_final)} | Cols: {list(df_final.columns)}")
+        status = "Updated" if is_update else "Created"
+        logger.info(f"[{name}] {status} successfully. Rows: {len(df_final)}")
 
-    def download_batch(self, assets: List[Dict[str, Any]], start_year: int = 1985):
+    def download_batch(self, assets: List[Dict[str, Any]], start_year: int = 1985) -> None:
         """
-        Process a batch of assets based on configuration list.
+        Process a batch of assets defined in a configuration list.
+
+        Args:
+            assets (List[Dict[str, Any]]): List of asset configurations.
+            start_year (int): Default start year if no data exists. Defaults to 1985.
         """
         logger.info("="*40)
-        logger.info(f"Starting Batch Download (Target Year: {start_year})")
+        logger.info(f"Starting Batch Download (Default Start: {start_year})")
         logger.info("="*40)
         
         for asset in assets:
+            time.sleep(30)
             name = asset["name"]
             ticker = asset["ticker"]
-            self.download_symbol(ticker, name, f"{start_year}-01-01")
+            asset_start_date = asset.get("initial_start_date") or asset.get("start_date")
+            start_fallback = asset_start_date if asset_start_date else f"{start_year}-01-01"
+            
+            self.download_symbol(ticker, name, start_fallback)
         
         logger.info("Batch Download Complete.\n")

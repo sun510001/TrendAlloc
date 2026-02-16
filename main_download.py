@@ -1,52 +1,52 @@
 from data_loader.yahoo_downloader import YahooIncrementalLoader
 from data_loader.data_processor import DataProcessor
+from backend.assets_config import AssetConfigManager
 from logger import logger
 
+class DataPipelineRunner:
+    """
+    Runner class to orchestrate the end-to-end data pipeline.
+    
+    This includes loading asset configurations, downloading raw data from 
+    external sources, and processing/aligning the data for backtesting.
+    """
 
-# Asset configuration: can be later provided by frontend
-ASSETS = [
-    {
-        "name": "Nasdaq100",
-        "ticker": "^NDX",   # Nasdaq 100 Index
-        "kind": "price",
-    },
-    {
-        "name": "GoldIndex",
-        "ticker": "^XAU",   # Philadelphia Gold/Silver Index
-        "kind": "price",
-    },
-    {
-        "name": "US30Y",
-        "ticker": "^TYX",   # 30-Year Treasury Yield (yield series)
-        "kind": "yield",
-        "engine": "bond",
-        "duration": 20.0,
-    },
-    {
-        "name": "US3M",
-        "ticker": "^IRX",   # 13-Week Treasury Bill Yield (yield series)
-        "kind": "yield",
-        "engine": "cash",
-    },
-]
+    def __init__(self, start_year: int = 1985) -> None:
+        """
+        Initialize the pipeline runner.
 
+        Args:
+            start_year (int): The default start year for data download if no 
+                              specific date is configured. Defaults to 1985.
+        """
+        self.start_year: int = start_year
 
-def main():
-    # --- Configuration ---
-    START_YEAR = 1985
+    def run(self) -> None:
+        """
+        Execute the data pipeline: Load -> Download -> Process.
 
-    # --- Step 1: Incremental ETL (Extract) ---
-    logger.info(">>> STEP 1: DOWNLOADING RAW DATA (INCREMENTAL) <<<")
-    downloader = YahooIncrementalLoader(storage_path="./data")
-    downloader.download_batch(ASSETS, start_year=START_YEAR)
+        This method coordinates the sequence of operations required to prepare
+        market data for the backtest engine.
+        """
+        # Load asset configurations from persistent storage
+        assets = AssetConfigManager.load_assets()
+        if not assets:
+            logger.error("No assets configured. Please add assets via the UI or config/assets.json first.")
+            return
 
-    # --- Step 2: Transformation & Pricing (Transform) ---
-    logger.info(">>> STEP 2: PROCESSING & SYNTHETIC PRICING <<<")
-    processor = DataProcessor(raw_path="./data", processed_path="./data_processed")
-    processor.process_and_align(ASSETS)
+        # Step 1: Incremental ETL (Extract)
+        logger.info(">>> STEP 1: DOWNLOADING RAW DATA (INCREMENTAL) <<<")
+        downloader = YahooIncrementalLoader(storage_path="./data")
+        downloader.download_batch(assets, start_year=self.start_year)
 
-    logger.info(">>> DATA PIPELINE FINISHED <<<")
+        # Step 2: Transformation & Alignment (Transform)
+        logger.info(">>> STEP 2: PROCESSING & SYNTHETIC PRICING <<<")
+        processor = DataProcessor(raw_path="./data", processed_path="./data_processed")
+        processor.process_and_align(assets)
 
+        logger.info(">>> DATA PIPELINE FINISHED <<<")
 
 if __name__ == "__main__":
-    main()
+    # Create and execute the runner
+    runner = DataPipelineRunner(start_year=1985)
+    runner.run()

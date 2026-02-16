@@ -1,22 +1,41 @@
 import pytz
 from datetime import datetime, time
 
-
-def get_time_difference(hour=9, minute=30, region="America/New_York"):
-    ny_tz = pytz.timezone(region)
-    now_ny = datetime.now(ny_tz)
-    four_am_ny = ny_tz.localize(datetime.combine(now_ny.date(), time(hour, minute)))
-    time_difference = now_ny - four_am_ny
-    return int(time_difference.total_seconds() / 60)
-
-def get_time_offset(datetime_obj: datetime):
+class TimeUtilities:
     """
-    Get the time offset in minutes from a specific timezone.
-
-    :param datetime_obj: The datetime object to convert.
-    :param timezone_str: The timezone string (e.g., 'America/New_York').
-    :return: Time offset in minutes.
+    Utility class for time-related calculations and timezone conversions.
     """
-    local_time = datetime.now()
-    time_difference = local_time - datetime_obj
-    return time_difference.total_seconds()
+
+    @staticmethod
+    def get_time_difference(hour: int = 9, minute: int = 30, region: str = "America/New_York") -> int:
+        """
+        Calculate the difference in minutes between the current time and a specific time in a target region.
+
+        Args:
+            hour (int): Target hour. Defaults to 9.
+            minute (int): Target minute. Defaults to 30.
+            region (str): Target timezone region. Defaults to "America/New_York".
+
+        Returns:
+            int: Time difference in minutes.
+        """
+        ny_tz = pytz.timezone(region)
+        now_ny = datetime.now(ny_tz)
+        target_time_ny = ny_tz.localize(datetime.combine(now_ny.date(), time(hour, minute)))
+        time_difference = now_ny - target_time_ny
+        return int(time_difference.total_seconds() / 60)
+
+    @staticmethod
+    def get_time_offset(datetime_obj: datetime) -> float:
+        """
+        Calculate the time difference in seconds between the current local time and a provided datetime object.
+
+        Args:
+            datetime_obj (datetime): The datetime object to compare against.
+
+        Returns:
+            float: Time offset in seconds.
+        """
+        local_time = datetime.now()
+        time_difference = local_time - datetime_obj
+        return time_difference.total_seconds()
