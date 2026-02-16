@@ -63,4 +63,4 @@ src/testTestingRootWkspc/coverageWorkspace/.coverage
 
 data/*
 data_processed/*
-strategies/*
+strategies/algorithms.py
