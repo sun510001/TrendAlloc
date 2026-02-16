@@ -1,7 +1,10 @@
 import pandas as pd
 import numpy as np
 import os
+from typing import List, Dict, Any
 from logger import logger
+from data_loader.yahoo_downloader import sanitize_filename
+
 
 class DataProcessor:
     """
@@ -16,11 +19,9 @@ class DataProcessor:
         if not os.path.exists(self.processed_path):
             os.makedirs(self.processed_path)
 
-    def _load_raw(self, name: str) -> pd.Series:
-        """
-        Load 'Close' column from raw CSV.
-        """
-        path = os.path.join(self.raw_path, f"{name}.csv")
+    def _load_raw(self, safe_name: str) -> pd.Series:
+        """Load 'Close' column from raw CSV using sanitized filename."""
+        path = os.path.join(self.raw_path, f"{safe_name}.csv")
         if not os.path.exists(path):
             raise FileNotFoundError(f"File not found: {path}")
         
@@ -84,60 +85,56 @@ class DataProcessor:
         price_series = initial_price * (1 + daily_ret).cumprod()
         return price_series
 
-    def process_and_align(self):
+    def process_and_align(self, assets: List[Dict[str, Any]]):
         """
         Main pipeline: Load Raw -> Apply Engines -> Align -> Save.
+        Dynamically supports any asset list configuration.
         """
         logger.info("Starting Data Processing & Alignment...")
 
         try:
-            # 1. Load Raw Data
-            # CRITICAL: Names must match the keys in your TICKER_MAP
-            nasdaq_raw = self._load_raw("Stocks")  # Corresponds to ^NDX
-            gold_raw = self._load_raw("Gold")      # Corresponds to ^XAU
-            bond_yield = self._load_raw("Bonds")   # Corresponds to ^TYX (Yield)
-            cash_yield = self._load_raw("Cash")    # Corresponds to ^IRX (Yield)
+            prices = {}
 
-            # 2. Apply Pricing Engines
-            logger.info("Calculating synthetic asset prices from yields...")
-            
-            # Equity: Use raw price directly
-            equity_price = nasdaq_raw
-            
-            # Gold: Use raw price directly (^XAU is an index price, not yield)
-            gold_price = gold_raw
-            
-            # Bonds: Convert 30Y Yield (^TYX) to Price
-            # Duration=20 is a standard approximation for 30Y Treasury Bonds
-            bond_price = self.bond_pricing_engine(bond_yield, duration=20.0)
-            
-            # Cash: Convert 3-Month Yield (^IRX) to Price
-            cash_price = self.cash_pricing_engine(cash_yield)
+            # 1. Load and transform each asset according to its configuration
+            for asset in assets:
+                name = asset["name"]
+                kind = asset.get("kind", "price")
+                engine = asset.get("engine")
+                duration = float(asset.get("duration", 20.0))
 
-            # 3. Align Data (Inner Join)
-            # This automatically handles the "Gold has no holidays" issue.
-            # concat(axis=1) matches indices. dropna() removes any row where ANY asset is missing.
-            # Since stocks have the most holidays, the result will align to the stock market calendar.
-            portfolio_df = pd.concat([
-                equity_price, 
-                bond_price, 
-                gold_price, 
-                cash_price
-            ], axis=1)
-            
-            # Rename columns to standard strategy names
-            portfolio_df.columns = ["Stocks", "Bonds", "Gold", "Cash"]
-            
-            # Remove NaN (Align dates where all markets were open)
+                safe_name = sanitize_filename(name)
+                logger.info(f"Loading raw data for asset '{name}' (file: {safe_name}.csv)...")
+                raw_series = self._load_raw(safe_name)
+
+                if kind == "price":
+                    price_series = raw_series
+                elif kind == "yield":
+                    if engine == "bond":
+                        price_series = self.bond_pricing_engine(raw_series, duration=duration)
+                    elif engine == "cash":
+                        price_series = self.cash_pricing_engine(raw_series)
+                    else:
+                        raise ValueError(f"Unsupported engine for yield asset '{name}': {engine}")
+                else:
+                    raise ValueError(f"Unsupported asset kind for '{name}': {kind}")
+
+                prices[name] = price_series
+
+            if not prices:
+                raise ValueError("No asset price series generated. Check asset configuration and raw data.")
+
+            # 2. Align Data (Inner Join on Date index)
+            portfolio_df = pd.DataFrame(prices)
             original_len = len(portfolio_df)
             portfolio_df.dropna(inplace=True)
             new_len = len(portfolio_df)
-            
+
             logger.info(f"Alignment complete. Rows: {original_len} -> {new_len}")
             logger.info(f"Date Range: {portfolio_df.index.min().date()} to {portfolio_df.index.max().date()}")
+            logger.info(f"Assets: {list(portfolio_df.columns)}")
 
-            # 4. Save Final Artifact
-            output_file = os.path.join(self.processed_path, "permanent_portfolio_aligned.csv")
+            # 3. Save Final Artifact
+            output_file = os.path.join(self.processed_path, "aligned_assets.csv")
             portfolio_df.to_csv(output_file)
             logger.info(f"Successfully saved processed data to: {output_file}")
             
@@ -152,8 +149,16 @@ class DataProcessor:
 
         except Exception as e:
             logger.exception(f"Processing failed: {e}")
-            raise # Re-raise to stop execution if ETL fails
+            raise  # Re-raise to stop execution if ETL fails
+
 
 if __name__ == "__main__":
+    # For local testing with a default 4-asset configuration (matching main_download.py)
+    default_assets: List[Dict[str, Any]] = [
+        {"name": "Stocks", "ticker": "^NDX", "kind": "price"},
+        {"name": "Gold", "ticker": "^XAU", "kind": "price"},
+        {"name": "Bonds", "ticker": "^TYX", "kind": "yield", "engine": "bond", "duration": 20.0},
+        {"name": "Cash", "ticker": "^IRX", "kind": "yield", "engine": "cash"},
+    ]
     processor = DataProcessor()
-    processor.process_and_align()
+    processor.process_and_align(default_assets)

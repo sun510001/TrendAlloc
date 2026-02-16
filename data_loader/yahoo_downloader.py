@@ -3,9 +3,20 @@ import pandas as pd
 import numpy as np
 import os
 import datetime
-from typing import Dict, List
+import re
+from typing import Dict, List, Any
 from logger import logger
 from utils.decorators import retry
+
+def sanitize_filename(name: str) -> str:
+    """
+    Sanitize the asset name to be used as a safe filename.
+    Removes or replaces characters like ^, /, \, etc.
+    """
+    # Replace any character that is not a letter, number, hyphen, or underscore with '_'
+    s = re.sub(r'[^\w\s-]', '', name).strip()
+    s = re.sub(r'[-\s]+', '_', s)
+    return s.lower()
 
 class YahooIncrementalLoader:
     """
@@ -17,6 +28,7 @@ class YahooIncrementalLoader:
     - Robust MultiIndex Handling: Flattens yfinance v0.2+ structures correctly.
     - Full OHLCV Preservation: Keeps Open, High, Low, Close, Volume.
     - Atomic Writes: Prevents CSV corruption.
+    - Safe Filenames: Sanitizes asset names for filesystem compatibility.
     """
 
     def __init__(self, storage_path: str = "./data"):
@@ -42,7 +54,8 @@ class YahooIncrementalLoader:
         """
         Smart downloader that preserves OHLCV data and handles yfinance quirks.
         """
-        file_path = os.path.join(self.storage_path, f"{name}.csv")
+        safe_name = sanitize_filename(name)
+        file_path = os.path.join(self.storage_path, f"{safe_name}.csv")
         df_old = self._get_existing_data(file_path)
         
         # 1. Determine Start Date
@@ -128,15 +141,17 @@ class YahooIncrementalLoader:
         action = "Updated" if is_update else "Created"
         logger.info(f"[{name}] {action} successfully. Rows: {len(df_final)} | Cols: {list(df_final.columns)}")
 
-    def download_batch(self, ticker_map: Dict[str, str], start_year: int = 1985):
+    def download_batch(self, assets: List[Dict[str, Any]], start_year: int = 1985):
         """
-        Process a batch of tickers.
+        Process a batch of assets based on configuration list.
         """
         logger.info("="*40)
         logger.info(f"Starting Batch Download (Target Year: {start_year})")
         logger.info("="*40)
         
-        for name, ticker in ticker_map.items():
+        for asset in assets:
+            name = asset["name"]
+            ticker = asset["ticker"]
             self.download_symbol(ticker, name, f"{start_year}-01-01")
         
         logger.info("Batch Download Complete.\n")

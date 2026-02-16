@@ -1,6 +1,8 @@
 import os
 from strategies.backtest_engine import PermanentPortfolioStrategy
 from logger import logger
+from strategies.algorithms import my_new_rebalance
+
 
 def main():
     # --- 1. Configuration Settings ---
@@ -8,7 +10,7 @@ def main():
     # Paths
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
     DATA_DIR = os.path.join(BASE_DIR, 'data_processed')
-    DATA_FILE = os.path.join(DATA_DIR, 'permanent_portfolio_aligned.csv')
+    DATA_FILE = os.path.join(DATA_DIR, 'aligned_assets.csv')
     
     # Backtest Parameters
     INITIAL_CAPITAL = 100_000.0
@@ -18,10 +20,14 @@ def main():
     # *** Date Range Configuration ***
     # Format: 'YYYY-MM-DD'
     # Set to None to use the full available history
-    START_DATE = '2019-01-01'  # Example: Start from Dot-com bubble
+    START_DATE = '2017-01-01'  # Example: Start from Dot-com bubble
     END_DATE = '2026-02-05'    # Example: End after 2022 inflation shock
     # START_DATE = None 
     # END_DATE = None
+
+    # *** Benchmark Configuration ***
+    # Assets to compare against in the final plot
+    SELECTED_BENCHMARKS = ['Nasdaq100', 'GoldIndex', 'US30Y', 'US3M']
     
     # ---------------------------------
     
@@ -39,7 +45,8 @@ def main():
             start_date=START_DATE, 
             end_date=END_DATE,
             rebalance_freq=REBALANCE_FREQ, 
-            fees=TRANSACTION_FEES
+            fees=TRANSACTION_FEES,
+            rebalance_fn=my_new_rebalance,
         )
         
         # 5. Stats Output
@@ -62,7 +69,7 @@ def main():
         # 6. Plotting
         saved_path = strategy.plot_results(
             output_dir=DATA_DIR, 
-            benchmark_col='Stocks' 
+            benchmark_cols=SELECTED_BENCHMARKS 
         )
         
         if saved_path:
